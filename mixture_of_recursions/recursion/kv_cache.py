@@ -17,18 +17,24 @@ class KVCacheManager:
         self.mode = mode
         self.max_recursions = max_recursions
         self.cache: Dict[int, Tuple[Tensor, Tensor]] = {}
+        self.active_masks: Dict[int, Tensor] = {}
 
     def reset(self) -> None:
         self.cache.clear()
+        self.active_masks.clear()
 
-    def update(self, step: int, kv: Tuple[Tensor, Tensor]) -> None:
+    def update(self, step: int, kv: Tuple[Tensor, Tensor], token_mask: Optional[Tensor] = None) -> None:
         """Store KV for a recursion step."""
 
         if self.mode == "share_first":
             if step == 0:
                 self.cache[0] = tuple(t.detach() for t in kv)
+                if token_mask is not None:
+                    self.active_masks[0] = token_mask.detach().clone()
         else:
             self.cache[step] = tuple(t.detach() for t in kv)
+            if token_mask is not None:
+                self.active_masks[step] = token_mask.detach().clone()
 
     def get(self, step: int) -> Optional[Tuple[Tensor, Tensor]]:
         """Return cached KV tensors if available."""
@@ -36,6 +42,11 @@ class KVCacheManager:
         if self.mode == "share_first":
             return self.cache.get(0)
         return self.cache.get(step)
+
+    def get_mask(self, step: int) -> Optional[Tensor]:
+        if self.mode == "share_first":
+            return self.active_masks.get(0)
+        return self.active_masks.get(step)
 
     def has(self, step: int) -> bool:
         if self.mode == "share_first":
@@ -46,7 +57,10 @@ class KVCacheManager:
     def combine_mask(attn_mask: Tensor, active_mask: Tensor) -> Tensor:
         """Utility to combine causal masks with token activity."""
 
-        extended = attn_mask.clone()
-        inactive = (~active_mask).float() * -1e4
-        extended = extended + inactive[:, None, None, :]
-        return extended
+        if attn_mask.dim() != 4:
+            raise ValueError("attention mask must be broadcastable to [batch, heads, seq, seq]")
+        base = attn_mask
+        if attn_mask.size(0) == 1 and active_mask.size(0) > 1:
+            base = attn_mask.expand(active_mask.size(0), -1, -1, -1)
+        inactive = (~active_mask).unsqueeze(1).unsqueeze(2).float() * -1e4
+        return base + inactive

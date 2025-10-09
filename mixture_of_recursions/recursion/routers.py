@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import Tensor, nn
@@ -20,6 +20,15 @@ class RoutingResult:
     logits: Optional[Tensor]
 
 
+@dataclass
+class RoutingStatistics:
+    """Summary statistics for router behaviour during a forward pass."""
+
+    active_tokens: List[int]
+    exits: List[int]
+    avg_depth: float
+
+
 class BaseRouter(nn.Module):
     """Base router class."""
 
@@ -28,9 +37,30 @@ class BaseRouter(nn.Module):
         self.temperature = temperature
         self.entropy_reg = entropy_reg
         self.last_loss: Tensor | None = None
+        self.active_tokens: List[int] = []
+        self.exited_tokens: List[int] = []
+
+    def reset_stats(self) -> None:
+        self.active_tokens.clear()
+        self.exited_tokens.clear()
+
+    def log_step(self, active: int, exited: int) -> None:
+        self.active_tokens.append(active)
+        self.exited_tokens.append(exited)
 
     def loss(self) -> Tensor:
         return self.last_loss if self.last_loss is not None else torch.tensor(0.0)
+
+    def statistics(self, depth_map: Tensor, min_depth: int) -> RoutingStatistics:
+        if depth_map.numel() == 0:
+            avg_depth = float(min_depth)
+        else:
+            avg_depth = float(depth_map.float().mean().item())
+        return RoutingStatistics(
+            active_tokens=list(self.active_tokens),
+            exits=list(self.exited_tokens),
+            avg_depth=avg_depth,
+        )
 
 
 class TokenChoiceRouter(BaseRouter):
@@ -53,6 +83,7 @@ class TokenChoiceRouter(BaseRouter):
         self.straight_through = straight_through
 
     def assign_depths(self, hidden_states: Tensor) -> RoutingResult:
+        self.reset_stats()
         logits = self.proj(hidden_states)
         if self.straight_through:
             depths_idx, probs = straight_through_sample(logits, temperature=self.temperature)
@@ -64,6 +95,12 @@ class TokenChoiceRouter(BaseRouter):
             self.last_loss = self.entropy_reg * entropy_loss(logits)
         else:
             self.last_loss = logits.new_tensor(0.0)
+        depth_hist = torch.bincount(depths_idx.flatten(), minlength=self.depth_choices)
+        cumulative = torch.cumsum(depth_hist.flip(0), dim=0).flip(0)
+        for step in range(self.depth_choices):
+            active = int(cumulative[step].item())
+            exited = int(depth_hist[step].item())
+            self.log_step(active, exited)
         return RoutingResult(depth_map=depth_values, probs=probs, logits=logits)
 
 
@@ -85,16 +122,24 @@ class ExpertChoiceRouter(BaseRouter):
         """Return mask of tokens that continue to the next recursion step."""
 
         scores = self.scorer(hidden_states).squeeze(-1)
+        batch, seq = scores.shape
         scores = scores.masked_fill(~active_mask, float("-inf"))
         keep_mask = torch.zeros_like(active_mask)
-        batch, seq = scores.shape
-        for b in range(batch):
-            active_idx = torch.nonzero(active_mask[b], as_tuple=False).squeeze(-1)
-            if active_idx.numel() == 0:
-                continue
-            k = max(1, int(torch.ceil(active_idx.numel() * torch.tensor(self.keep_ratio)).item()))
-            chosen = active_idx[torch.topk(scores[b, active_idx], k).indices]
-            keep_mask[b, chosen] = True
+        if active_mask.any():
+            active_counts = active_mask.sum(dim=-1)
+            keep_counts = torch.ceil(active_counts.float() * self.keep_ratio).clamp_min(1).long()
+            keep_counts = torch.where(active_counts == 0, active_counts, keep_counts)
+            max_keep = int(keep_counts.max().item())
+            if max_keep > 0:
+                topk_indices = torch.topk(scores, k=max_keep, dim=-1).indices
+                selector = (
+                    torch.arange(max_keep, device=scores.device)[None, :] < keep_counts[:, None]
+                )
+                keep_mask.scatter_(1, topk_indices, selector)
+            exited = (active_counts - keep_counts).clamp_min(0)
+            self.log_step(int(active_counts.sum().item()), int(exited.sum().item()))
+        else:
+            self.log_step(0, 0)
         if self.entropy_reg > 0:
             logits = self.scorer.weight.new_zeros(batch, seq, 2)
             logits[..., 1] = scores

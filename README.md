@@ -10,6 +10,8 @@ Mixture-of-Recursions (MoR) extends Transformer language models with a recursive
 
 At each recursion step a lightweight router scores the active tokens. With **expert-choice routing** we iteratively keep the top-`p%` tokens and let the remainder exit. With **token-choice routing** every token picks its full depth once, then only those scheduled for deeper steps remain active. Two key-value cache strategies are included: recursion-wise caching stores a dedicated slot per step, while the share-first strategy reuses the first step’s cache to lower prefill latency. Both integrate with depth-wise batching to avoid wasted computation on inactive tokens. Training adds entropy regularization and optional depth targets to stabilise the router. We also ship an inference helper with greedy decoding and introspection hooks.
 
+If you prefer an interactive tour, open [`notebooks/mor_quickstart.ipynb`](notebooks/mor_quickstart.ipynb) for a runnable walkthrough covering configuration, a few toy training iterations, and greedy decoding with per-token depth annotations.
+
 ## Quickstart
 
 ```

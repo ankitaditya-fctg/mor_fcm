@@ -36,6 +36,18 @@ def main() -> None:
     model, val_loss = train(model_config, router_config, train_config, kv_config)
     print(f"Validation loss: {val_loss:.4f}")
 
+    with torch.no_grad():
+        sample = torch.randint(0, model_config.vocab_size, (1, train_config.seq_len + 1))
+        stats = model(sample[:, :-1], labels=sample)
+        avg_depth = float(stats.get("router_avg_depth", torch.tensor(0.0)).item())
+        active = stats.get("router_active")
+        exits = stats.get("router_exits")
+        print("Router avg depth:", f"{avg_depth:.2f}")
+        if active is not None:
+            print("Active tokens per step:", active.tolist())
+        if exits is not None:
+            print("Exited tokens per step:", exits.tolist())
+
     prompt = "MiR:"
     text, depths = generate(model, prompt, max_new_tokens=16)
     print("Generated text:", text)

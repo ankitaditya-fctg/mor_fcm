@@ -65,7 +65,15 @@ def train(
         opt.zero_grad()
         if (step + 1) % train_config.log_interval == 0:
             ppl = torch.exp(outputs["loss"]).item()
-            print(f"step {step+1}: loss={outputs['loss'].item():.4f} ppl={ppl:.2f}")
+            avg_depth = float(outputs.get("router_avg_depth", torch.tensor(0.0)).item())
+            active_tokens = outputs.get("router_active")
+            if active_tokens is not None and active_tokens.numel() > 0:
+                active_summary = ",".join(str(int(v.item())) for v in active_tokens)
+            else:
+                active_summary = "-"
+            print(
+                f"step {step+1}: loss={outputs['loss'].item():.4f} ppl={ppl:.2f} avg_depth={avg_depth:.2f} active={active_summary}"
+            )
 
     val_loss = evaluate(model, val_loader, device)
     return model, val_loss

@@ -9,8 +9,9 @@ from torch import Tensor, nn
 
 from .config import ModelConfig, RouterConfig, KVConfig
 from .modules.embeddings import TokenPositionalEmbedding
+from .modules.attention import build_rotary_cache
 from .recursion.recursion_block import SharedRecursionBlock
-from .recursion.routers import build_router, RoutingResult
+from .recursion.routers import RoutingResult, RoutingStatistics, build_router
 from .recursion.kv_cache import KVCacheManager
 
 
@@ -39,6 +40,9 @@ class MoRModel(nn.Module):
         self.lm_head.weight = self.embedding.token_embed.weight  # type: ignore[attr-defined]
         self.kv_manager = KVCacheManager((kv_config or KVConfig()).mode, model_config.max_recursions)
         self.final_norm = nn.LayerNorm(model_config.d_model)
+        self._rotary_cache: Optional[Tuple[Tensor, Tensor]] = None
+        self._rotary_cache_len: int = 0
+        self._min_depth = self.router_meta["min_depth"]
 
     def _causal_mask(self, seq_len: int, device: torch.device) -> Tensor:
         mask = torch.full((1, 1, seq_len, seq_len), float("-inf"), device=device)
@@ -63,13 +67,28 @@ class MoRModel(nn.Module):
         router_loss = torch.tensor(0.0, device=device)
         depth_map = torch.zeros(batch, seq_len, dtype=torch.long, device=device)
         routing_result: Optional[RoutingResult] = None
+        router_stats: Optional[RoutingStatistics] = None
+
+        if self.config.rotary:
+            if self._rotary_cache is None or self._rotary_cache_len < seq_len:
+                self._rotary_cache = build_rotary_cache(
+                    seq_len,
+                    self.recursion_block.block.attn.head_dim,
+                    device=device,
+                )
+                self._rotary_cache_len = seq_len
+            rotary_cache = self._rotary_cache
+        else:
+            rotary_cache = None
 
         if self.router_config.type == "token_choice":
             routing_result = self.router.assign_depths(hidden_states.detach())
             depth_map = routing_result.depth_map
             router_loss = router_loss + self.router.loss().to(device)
+            router_stats = self.router.statistics(depth_map, self._min_depth)
         else:
             depth_map.fill_(0)
+            self.router.reset_stats()
 
         current_active = torch.ones(batch, seq_len, dtype=torch.bool, device=device)
         self.kv_manager.reset()
@@ -84,12 +103,18 @@ class MoRModel(nn.Module):
             if not step_mask.any():
                 continue
 
+            step_attn_mask = KVCacheManager.combine_mask(attn_mask, step_mask)
             kv_override = self.kv_manager.get(step)
-            updated, kv = self.recursion_block(residual_states, attn_mask=attn_mask, kv_override=kv_override)
+            updated, kv = self.recursion_block(
+                residual_states,
+                attn_mask=step_attn_mask,
+                kv_override=kv_override,
+                rotary_cache=rotary_cache,
+            )
             updated = torch.where(step_mask.unsqueeze(-1), updated, residual_states)
             residual_states = updated
             if kv is not None:
-                self.kv_manager.update(step, kv)
+                self.kv_manager.update(step, kv, token_mask=step_mask)
 
             if self.router_config.type == "expert_choice":
                 depth_map = torch.where(step_mask, torch.full_like(depth_map, step + 1), depth_map)
@@ -101,6 +126,7 @@ class MoRModel(nn.Module):
 
         if self.router_config.type == "expert_choice":
             depth_map = torch.where(depth_map == 0, torch.ones_like(depth_map), depth_map)
+            router_stats = self.router.statistics(depth_map, self._min_depth)
 
         if self.router_config.target_depth is not None and self.router_config.depth_penalty > 0:
             avg_depth = depth_map.float().mean()
@@ -114,6 +140,10 @@ class MoRModel(nn.Module):
             "depth_map": depth_map,
             "router_loss": router_loss,
         }
+        if router_stats is not None:
+            output["router_active"] = torch.tensor(router_stats.active_tokens, device=device)
+            output["router_exits"] = torch.tensor(router_stats.exits, device=device)
+            output["router_avg_depth"] = torch.tensor(router_stats.avg_depth, device=device)
         if labels is not None:
             loss = nn.functional.cross_entropy(logits[:, :-1].reshape(-1, logits.size(-1)), labels[:, 1:].reshape(-1))
             output["loss"] = loss + router_loss
