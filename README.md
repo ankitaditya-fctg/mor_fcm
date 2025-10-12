@@ -1,3 +1,6 @@
+[![CI](https://github.com/mixture-of-recursions/mixture_of_recursions/actions/workflows/ci.yml/badge.svg)](https://github.com/mixture-of-recursions/mixture_of_recursions/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/badge/release-v0.1.0-blue.svg)](https://github.com/mixture-of-recursions/mixture_of_recursions/releases/tag/v0.1.0)
+
 # Mixture-of-Recursions (MoR)
 
 ```
@@ -24,7 +27,54 @@ pytest -q
 ```
 python mor_demo.py --router token_choice --kv_mode share_first --R 3 --target_depth 2.0
 python mor_demo.py --router expert_choice --keep_ratio 0.5 --kv_mode recursion --R 4
+python mor_demo.py --sharing middle_cycle --R 4 --router expert_choice --keep_ratio 0.6
 ```
+
+### Quick Benchmarks
+
+Use the lightweight `bench_infer.py` script to measure per-token throughput across router and KV cache variants.
+
+```
+python bench_infer.py \
+  --router expert_choice --keep_ratio 0.5 \
+  --kv_mode recursion --R 4 \
+  --seq_len 1024 --batch_sizes 1,4,8 \
+  --num_warmup 5 --num_iters 20 \
+  --report_csv runs/bench.csv
+```
+
+Example output:
+
+```
+router=expert_choice kv_mode=recursion R=4 device=cpu tokens=64
+  batch   median tok/s   p50 ms/token
+      1          87.42           11.44
+```
+
+### Router Entropy and Depth Histograms
+
+Routers now expose a temperature-scaled entropy penalty to encourage exploration. Enable it during training with the `--router_entropy_weight` flag and log per-step depth distributions with `--log_depth_hist_every`. Histograms can be persisted to CSV for later analysis and plotting.
+
+```
+python mor_demo.py \
+  --router token_choice --R 4 --router_temperature 1.2 \
+  --router_entropy_weight 0.02 \
+  --log_depth_hist_every 100 \
+  --depth_hist_path runs/depth_hist.csv \
+  --deterministic
+```
+
+The helper script can convert histogram CSVs into compact figures:
+
+```
+python scripts/plot_depth_hist.py runs/depth_hist.csv runs/depth_hist.png
+```
+
+We avoid committing binary assets to the repository; generate plots locally as needed.
+
+### Parameter Sharing
+
+Recursive blocks now support configurable weight sharing. `--sharing none` keeps per-depth parameters, `--sharing cycle` reuses a fixed number of shards cyclically, and `--sharing middle_cycle` prioritises sharing around the centre of the recursion stack while keeping the outer layers distinct. Combine sharing with either router for rapid ablations.
 
 ## Design choices (from paper)
 

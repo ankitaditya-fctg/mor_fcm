@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+      - name: Ruff
+        run: ruff check .
+      - name: Pytest
+        run: pytest -q
+      - name: Bench smoke test
+        run: python bench_infer.py --num_iters=2 --num_warmup=1 --batch_sizes=1 --seq_len=64 --tokens_to_generate=8 --device=cpu --deterministic

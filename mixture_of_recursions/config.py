@@ -18,6 +18,7 @@ class ModelConfig:
     max_recursions: int = 3
     dropout: float = 0.1
     rotary: bool = False
+    sharing: str = "none"
 
 
 @dataclass
@@ -29,7 +30,7 @@ class RouterConfig:
     min_depth: int = 1
     max_depth: Optional[int] = None
     temperature: float = 1.0
-    entropy_reg: float = 0.0
+    entropy_weight: float = 0.0
     straight_through: bool = True
     target_depth: Optional[float] = None
     depth_penalty: float = 0.0
@@ -54,3 +55,7 @@ class TrainConfig:
     device: str = "cpu"
     fp16: bool = False
     log_interval: int = 10
+    log_depth_hist_every: int = 0
+    depth_hist_path: Optional[str] = None
+    deterministic: bool = False
+    seed: int = 0

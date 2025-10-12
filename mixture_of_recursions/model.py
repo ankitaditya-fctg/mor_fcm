@@ -30,6 +30,8 @@ class MoRModel(nn.Module):
             n_heads=model_config.n_heads,
             d_ff=model_config.d_ff,
             n_layers_shared=model_config.n_layers_shared,
+            max_recursions=model_config.max_recursions,
+            sharing=model_config.sharing,
             dropout=model_config.dropout,
             rotary=model_config.rotary,
         )
@@ -73,7 +75,7 @@ class MoRModel(nn.Module):
             if self._rotary_cache is None or self._rotary_cache_len < seq_len:
                 self._rotary_cache = build_rotary_cache(
                     seq_len,
-                    self.recursion_block.block.attn.head_dim,
+                    self.recursion_block.head_dim,
                     device=device,
                 )
                 self._rotary_cache_len = seq_len
@@ -94,6 +96,7 @@ class MoRModel(nn.Module):
         self.kv_manager.reset()
 
         residual_states = hidden_states
+        entropy_weight = self.router_config.entropy_weight
         for step in range(self.max_recursions):
             if self.router_config.type == "token_choice":
                 step_mask = depth_map >= (step + 1)
@@ -107,6 +110,7 @@ class MoRModel(nn.Module):
             kv_override = self.kv_manager.get(step)
             updated, kv = self.recursion_block(
                 residual_states,
+                depth=step,
                 attn_mask=step_attn_mask,
                 kv_override=kv_override,
                 rotary_cache=rotary_cache,
@@ -127,6 +131,8 @@ class MoRModel(nn.Module):
         if self.router_config.type == "expert_choice":
             depth_map = torch.where(depth_map == 0, torch.ones_like(depth_map), depth_map)
             router_stats = self.router.statistics(depth_map, self._min_depth)
+        if entropy_weight > 0:
+            router_loss = router_loss + entropy_weight * self.router.entropy().to(device)
 
         if self.router_config.target_depth is not None and self.router_config.depth_penalty > 0:
             avg_depth = depth_map.float().mean()
@@ -145,7 +151,12 @@ class MoRModel(nn.Module):
             output["router_exits"] = torch.tensor(router_stats.exits, device=device)
             output["router_avg_depth"] = torch.tensor(router_stats.avg_depth, device=device)
         if labels is not None:
-            loss = nn.functional.cross_entropy(logits[:, :-1].reshape(-1, logits.size(-1)), labels[:, 1:].reshape(-1))
+            target = labels[:, 1:]
+            if target.size(1) != logits.size(1):
+                min_len = min(target.size(1), logits.size(1))
+                target = target[:, :min_len]
+                logits = logits[:, :min_len, :]
+            loss = nn.functional.cross_entropy(logits.reshape(-1, logits.size(-1)), target.reshape(-1))
             output["loss"] = loss + router_loss
         return output
 

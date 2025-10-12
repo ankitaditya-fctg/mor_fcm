@@ -1,8 +1,8 @@
 import pytest
 
-torch = pytest.importorskip("torch")
-
 from mixture_of_recursions.recursion.kv_cache import KVCacheManager
+
+torch = pytest.importorskip("torch")
 
 
 def test_recursion_mode_stores_per_step():

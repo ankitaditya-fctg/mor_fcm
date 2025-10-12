@@ -18,6 +18,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest",
+    "matplotlib",
+    "ruff",
 ]
 
 [tool.setuptools.packages.find]

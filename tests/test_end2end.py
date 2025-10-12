@@ -1,9 +1,9 @@
 import pytest
 
-torch = pytest.importorskip("torch")
-
-from mixture_of_recursions.config import ModelConfig, RouterConfig, KVConfig
+from mixture_of_recursions.config import KVConfig, ModelConfig, RouterConfig
 from mixture_of_recursions.model import MoRModel
+
+torch = pytest.importorskip("torch")
 
 
 def test_forward_backward_and_generate():
