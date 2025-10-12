@@ -32,17 +32,18 @@ class RoutingStatistics:
 class BaseRouter(nn.Module):
     """Base router class."""
 
-    def __init__(self, d_model: int, temperature: float = 1.0, entropy_reg: float = 0.0) -> None:
+    def __init__(self, d_model: int, temperature: float = 1.0) -> None:
         super().__init__()
         self.temperature = temperature
-        self.entropy_reg = entropy_reg
         self.last_loss: Tensor | None = None
         self.active_tokens: List[int] = []
         self.exited_tokens: List[int] = []
+        self._entropy_terms: List[Tensor] = []
 
     def reset_stats(self) -> None:
         self.active_tokens.clear()
         self.exited_tokens.clear()
+        self._entropy_terms.clear()
 
     def log_step(self, active: int, exited: int) -> None:
         self.active_tokens.append(active)
@@ -50,6 +51,23 @@ class BaseRouter(nn.Module):
 
     def loss(self) -> Tensor:
         return self.last_loss if self.last_loss is not None else torch.tensor(0.0)
+
+    def record_entropy(self, entropy: Tensor) -> None:
+        """Track entropy contributions for optional regularisation."""
+
+        self._entropy_terms.append(entropy)
+
+    def entropy(self) -> Tensor:
+        """Return mean entropy collected during the forward pass."""
+
+        if not self._entropy_terms:
+            try:
+                device = next(self.parameters()).device
+            except StopIteration:
+                device = torch.device("cpu")
+            return torch.zeros((), device=device)
+        stacked = torch.stack([term.float() for term in self._entropy_terms])
+        return stacked.mean()
 
     def statistics(self, depth_map: Tensor, min_depth: int) -> RoutingStatistics:
         if depth_map.numel() == 0:
@@ -73,9 +91,8 @@ class TokenChoiceRouter(BaseRouter):
         max_depth: int,
         straight_through: bool = True,
         temperature: float = 1.0,
-        entropy_reg: float = 0.0,
     ) -> None:
-        super().__init__(d_model, temperature=temperature, entropy_reg=entropy_reg)
+        super().__init__(d_model, temperature=temperature)
         self.min_depth = min_depth
         self.max_depth = max_depth
         self.depth_choices = max_depth - min_depth + 1
@@ -91,17 +108,17 @@ class TokenChoiceRouter(BaseRouter):
             probs = torch.softmax(logits / self.temperature, dim=-1)
             depths_idx = torch.argmax(probs, dim=-1)
         depth_values = depths_idx + self.min_depth
-        if self.entropy_reg > 0:
-            self.last_loss = self.entropy_reg * entropy_loss(logits)
-        else:
-            self.last_loss = logits.new_tensor(0.0)
+        scaled_logits = logits / self.temperature
+        entropy = entropy_loss(scaled_logits)
+        self.record_entropy(entropy)
+        self.last_loss = scaled_logits.new_tensor(0.0)
         depth_hist = torch.bincount(depths_idx.flatten(), minlength=self.depth_choices)
         cumulative = torch.cumsum(depth_hist.flip(0), dim=0).flip(0)
         for step in range(self.depth_choices):
             active = int(cumulative[step].item())
             exited = int(depth_hist[step].item())
             self.log_step(active, exited)
-        return RoutingResult(depth_map=depth_values, probs=probs, logits=logits)
+        return RoutingResult(depth_map=depth_values, probs=probs, logits=scaled_logits)
 
 
 class ExpertChoiceRouter(BaseRouter):
@@ -112,9 +129,8 @@ class ExpertChoiceRouter(BaseRouter):
         d_model: int,
         keep_ratio: float,
         temperature: float = 1.0,
-        entropy_reg: float = 0.0,
     ) -> None:
-        super().__init__(d_model, temperature=temperature, entropy_reg=entropy_reg)
+        super().__init__(d_model, temperature=temperature)
         self.keep_ratio = keep_ratio
         self.scorer = nn.Linear(d_model, 1)
 
@@ -123,7 +139,7 @@ class ExpertChoiceRouter(BaseRouter):
 
         scores = self.scorer(hidden_states).squeeze(-1)
         batch, seq = scores.shape
-        scores = scores.masked_fill(~active_mask, float("-inf"))
+        scaled_scores = (scores / self.temperature).masked_fill(~active_mask, float("-inf"))
         keep_mask = torch.zeros_like(active_mask)
         if active_mask.any():
             active_counts = active_mask.sum(dim=-1)
@@ -131,7 +147,7 @@ class ExpertChoiceRouter(BaseRouter):
             keep_counts = torch.where(active_counts == 0, active_counts, keep_counts)
             max_keep = int(keep_counts.max().item())
             if max_keep > 0:
-                topk_indices = torch.topk(scores, k=max_keep, dim=-1).indices
+                topk_indices = torch.topk(scaled_scores, k=max_keep, dim=-1).indices
                 selector = (
                     torch.arange(max_keep, device=scores.device)[None, :] < keep_counts[:, None]
                 )
@@ -140,13 +156,11 @@ class ExpertChoiceRouter(BaseRouter):
             self.log_step(int(active_counts.sum().item()), int(exited.sum().item()))
         else:
             self.log_step(0, 0)
-        if self.entropy_reg > 0:
-            logits = self.scorer.weight.new_zeros(batch, seq, 2)
-            logits[..., 1] = scores
-            logits[..., 0] = 0
-            self.last_loss = self.entropy_reg * entropy_loss(logits)
-        else:
-            self.last_loss = scores.new_tensor(0.0)
+        logits = self.scorer.weight.new_zeros(batch, seq, 2)
+        logits[..., 1] = scaled_scores
+        entropy = entropy_loss(logits)
+        self.record_entropy(entropy)
+        self.last_loss = logits.new_tensor(0.0)
         return keep_mask
 
 
@@ -166,7 +180,6 @@ def build_router(
             max_depth=max_depth,
             straight_through=router_config.straight_through,
             temperature=router_config.temperature,
-            entropy_reg=router_config.entropy_reg,
         )
         meta = {"max_depth": max_depth, "min_depth": router_config.min_depth}
         return router, meta
@@ -175,7 +188,6 @@ def build_router(
             d_model,
             keep_ratio=router_config.keep_ratio,
             temperature=router_config.temperature,
-            entropy_reg=router_config.entropy_reg,
         )
         meta = {"max_depth": max_recursions, "min_depth": 1}
         return router, meta

@@ -1,9 +1,9 @@
 import pytest
 
-torch = pytest.importorskip("torch")
-
 from mixture_of_recursions.config import RouterConfig
 from mixture_of_recursions.recursion.routers import build_router
+
+torch = pytest.importorskip("torch")
 
 
 def test_token_choice_depth_assignment():
