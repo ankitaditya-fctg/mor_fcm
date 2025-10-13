@@ -72,6 +72,19 @@ python scripts/plot_depth_hist.py runs/depth_hist.csv runs/depth_hist.png
 
 We avoid committing binary assets to the repository; generate plots locally as needed.
 
+### Hugging Face Speed Decode
+
+The repository also ships a standalone, weight-preserving speed adapter for Hugging Face causal LMs. It performs per-token depth routing without editing base model parameters and works with Llama, Mistral, and Qwen2/Qwen3 checkpoints on CPU or GPU. Use the `speed_decode.py` CLI to benchmark or inspect depth traces against production-scale models:
+
+```
+python speed_decode.py \
+  --model meta-llama/Llama-3-8B-Instruct \
+  --router expert_choice --R 4 --keep_ratio 0.6 \
+  --max_new_tokens 64 --prompt "Explain mixture of recursions simply."
+```
+
+Set `--no_skip` (or `--router expert_choice --keep_ratio 1.0`) to measure parity with full-depth decoding, and enable `--return_depth_trace` to log how far each token traversed. The CLI prints throughput metrics and a depth histogram by default, and can optionally persist results with `--csv runs/depth_hist.csv`.
+
 ### Parameter Sharing
 
 Recursive blocks now support configurable weight sharing. `--sharing none` keeps per-depth parameters, `--sharing cycle` reuses a fixed number of shards cyclically, and `--sharing middle_cycle` prioritises sharing around the centre of the recursion stack while keeping the outer layers distinct. Combine sharing with either router for rapid ablations.
