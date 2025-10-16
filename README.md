@@ -3,10 +3,17 @@
 
 # Mixture-of-Recursions (MoR)
 
-```
-Token stream ──► Router ──► depth-wise batches ──► Shared recursion block (×R) ──► LM head
-                 │              │                          │
-                 └─► early exit └─► KV manager ────────────┘
+```mermaid
+flowchart LR
+    A[Token Stream] --> B[Router]
+    B --> C[Depth-wise Batches]
+    C --> D[Shared Recursion Block ×R]
+    D --> E[LM Head]
+
+    %% Side branches
+    B -.-> F[Early Exit]
+    C -.-> G[KV Manager]
+    G --> D
 ```
 
 Mixture-of-Recursions (MoR) extends Transformer language models with a recursive computation graph where a single “recursion block” is reused multiple times. Tokens decide how deep to go, so easy contexts exit early while hard tokens request more capacity. The shared block keeps parameters compact, yet depth-wise batching and caching ensure the compute path stays efficient. This repository provides a concise, CPU-friendly PyTorch implementation with modular components for research and prototyping.
